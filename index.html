@@ -148,6 +148,7 @@
   .badge.checking { background: var(--border); color: var(--muted); }
 
   .code-cell { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+  .code-cell.first-code { color: var(--warn); font-weight: 500; }
   .rt-cell   { font-family: var(--mono); font-size: 12px; color: var(--muted); }
   .note-cell { font-size: 12px; color: var(--muted); max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
@@ -162,10 +163,10 @@
 
   @media (max-width: 600px) {
     .stats { grid-template-columns: repeat(2, 1fr); }
-    .results-table th:nth-child(3),
-    .results-table td:nth-child(3),
     .results-table th:nth-child(4),
-    .results-table td:nth-child(4) { display: none; }
+    .results-table td:nth-child(4),
+    .results-table th:nth-child(5),
+    .results-table td:nth-child(5) { display: none; }
   }
 </style>
 </head>
@@ -227,7 +228,8 @@ https://example.com"></textarea>
           <tr>
             <th>域名</th>
             <th>状态</th>
-            <th>状态码</th>
+            <th>首次状态码</th>
+            <th>最终状态码</th>
             <th>响应时间</th>
             <th>说明</th>
           </tr>
@@ -280,7 +282,7 @@ async function startCheck() {
   document.getElementById('stats').style.display = 'grid';
   document.getElementById('filter-row').style.display = 'flex';
   document.getElementById('results-wrap').style.display = 'block';
-  document.getElementById('tbody').innerHTML = '<tr><td colspan="5" class="empty-state">正在检测，请稍候...</td></tr>';
+  document.getElementById('tbody').innerHTML = '<tr><td colspan="6" class="empty-state">正在检测，请稍候...</td></tr>';
 
   const BATCH = 10;
   const total = domains.length;
@@ -298,7 +300,7 @@ async function startCheck() {
       allResults.push(...data.results);
     } catch(e) {
       batch.forEach(d => allResults.push({
-        domain: d, status: '请求失败', code: '—', rt: '—', ssl: '—',
+        domain: d, status: '请求失败', code: '—', firstCode: '—', rt: '—', ssl: '—',
         note: '无法连接到检测服务', redirect_to: ''
       }));
     }
@@ -329,15 +331,18 @@ function renderTable() {
     allResults.filter(r => statusClass(r.status) === 'err');
 
   if (!filtered.length) {
-    document.getElementById('tbody').innerHTML = '<tr><td colspan="5" class="empty-state">暂无数据</td></tr>';
+    document.getElementById('tbody').innerHTML = '<tr><td colspan="6" class="empty-state">暂无数据</td></tr>';
     return;
   }
 
   document.getElementById('tbody').innerHTML = filtered.map(r => {
     const sc = statusClass(r.status);
+    const first = r.firstCode ?? '—';
+    const redirected = first !== '—' && r.code !== '—' && String(first) !== String(r.code);
     return `<tr>
       <td class="domain-cell"><a href="${r.url}" target="_blank" rel="noopener">${r.domain}</a></td>
       <td><span class="badge ${sc}">${r.status}</span></td>
+      <td class="code-cell ${redirected ? 'first-code' : ''}">${first}</td>
       <td class="code-cell">${r.code}</td>
       <td class="rt-cell">${r.rt}</td>
       <td class="note-cell" title="${r.note}">${r.redirect_to ? '→ ' + r.redirect_to : r.note}</td>
@@ -362,9 +367,9 @@ function setFilter(f, btn) {
 }
 
 function exportCSV() {
-  const header = '域名,状态,状态码,响应时间,SSL,说明\n';
+  const header = '域名,状态,首次状态码,最终状态码,响应时间,SSL,说明\n';
   const rows = allResults.map(r =>
-    `"${r.domain}","${r.status}","${r.code}","${r.rt}","${r.ssl}","${r.note}"`
+    `"${r.domain}","${r.status}","${r.firstCode ?? '—'}","${r.code}","${r.rt}","${r.ssl}","${r.note}"`
   ).join('\n');
   const blob = new Blob(['\uFEFF' + header + rows], { type: 'text/csv;charset=utf-8' });
   const a = document.createElement('a');

@@ -21,10 +21,10 @@ async function checkDns(host) {
   }
 }
 
-function fetchUrl(url, redirectCount = 0) {
+function fetchUrl(url, redirectCount = 0, firstStatus = null) {
   return new Promise((resolve) => {
     if (redirectCount > 5) {
-      return resolve({ status: 0, finalUrl: url, error: '重定向次数过多' });
+      return resolve({ status: 0, finalUrl: url, error: '重定向次数过多', firstStatus });
     }
     const parsed = new URL(url);
     const mod = parsed.protocol === 'https:' ? https : http;
@@ -38,18 +38,20 @@ function fetchUrl(url, redirectCount = 0) {
     };
     const req = mod.request(options, (res) => {
       const code = res.statusCode;
+      // 记录整条链路中第一次访问的状态码
+      const first = firstStatus === null ? code : firstStatus;
       if (code >= 300 && code < 400 && res.headers.location) {
         const next = new URL(res.headers.location, url).toString();
         res.resume();
-        return resolve(fetchUrl(next, redirectCount + 1).then(r => ({
-          ...r, firstStatus: r.firstStatus || code, redirectedFrom: url
+        return resolve(fetchUrl(next, redirectCount + 1, first).then(r => ({
+          ...r, firstStatus: first, redirectedFrom: url
         })));
       }
       res.resume();
-      resolve({ status: code, finalUrl: url, error: null });
+      resolve({ status: code, finalUrl: url, error: null, firstStatus: first });
     });
-    req.on('timeout', () => { req.destroy(); resolve({ status: 0, finalUrl: url, error: 'timeout' }); });
-    req.on('error', (e) => resolve({ status: 0, finalUrl: url, error: e.message }));
+    req.on('timeout', () => { req.destroy(); resolve({ status: 0, finalUrl: url, error: 'timeout', firstStatus }); });
+    req.on('error', (e) => resolve({ status: 0, finalUrl: url, error: e.message, firstStatus }));
     req.end();
   });
 }
@@ -61,7 +63,7 @@ async function checkOne(raw) {
     return { domain: raw, url, status: 'URL无效', code: '—', rt: '—', ssl: '—', note: 'URL格式错误', redirect_to: '' };
   }
 
-  const result = { domain: raw, url, status: '', code: '—', rt: '—', ssl: url.startsWith('https') ? '✓' : '✗', note: '', redirect_to: '' };
+  const result = { domain: raw, url, status: '', code: '—', firstCode: '—', rt: '—', ssl: url.startsWith('https') ? '✓' : '✗', note: '', redirect_to: '' };
 
   const dnsOk = await checkDns(host);
   if (!dnsOk) {
@@ -69,9 +71,10 @@ async function checkOne(raw) {
   }
 
   const t0 = Date.now();
-  const { status, finalUrl, error } = await fetchUrl(url);
+  const { status, finalUrl, error, firstStatus } = await fetchUrl(url);
   const rt = Date.now() - t0;
   result.rt = rt + ' ms';
+  if (firstStatus) result.firstCode = firstStatus;
 
   if (finalUrl && finalUrl !== url) result.redirect_to = finalUrl;
 
