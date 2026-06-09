@@ -150,6 +150,11 @@
   .code-cell { font-family: var(--mono); font-size: 12px; color: var(--muted); }
   .code-cell.first-code { color: var(--warn); font-weight: 500; }
   .rt-cell   { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+  .ssl-cell  { font-family: var(--mono); font-size: 11px; white-space: nowrap; }
+  .ssl-cell.ssl-ok   { color: var(--accent); }
+  .ssl-cell.ssl-warn { color: var(--warn); }
+  .ssl-cell.ssl-err  { color: var(--err); }
+  .ssl-cell.ssl-na   { color: var(--muted); }
   .note-cell { font-size: 12px; color: var(--muted); max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   .results-shell {
@@ -166,7 +171,9 @@
     .results-table th:nth-child(4),
     .results-table td:nth-child(4),
     .results-table th:nth-child(5),
-    .results-table td:nth-child(5) { display: none; }
+    .results-table td:nth-child(5),
+    .results-table th:nth-child(7),
+    .results-table td:nth-child(7) { display: none; }
   }
 </style>
 </head>
@@ -231,6 +238,7 @@ https://example.com"></textarea>
             <th>首次状态码</th>
             <th>最终状态码</th>
             <th>响应时间</th>
+            <th>SSL证书</th>
             <th>说明</th>
           </tr>
         </thead>
@@ -282,7 +290,7 @@ async function startCheck() {
   document.getElementById('stats').style.display = 'grid';
   document.getElementById('filter-row').style.display = 'flex';
   document.getElementById('results-wrap').style.display = 'block';
-  document.getElementById('tbody').innerHTML = '<tr><td colspan="6" class="empty-state">正在检测，请稍候...</td></tr>';
+  document.getElementById('tbody').innerHTML = '<tr><td colspan="7" class="empty-state">正在检测，请稍候...</td></tr>';
 
   const BATCH = 10;
   const total = domains.length;
@@ -300,7 +308,7 @@ async function startCheck() {
       allResults.push(...data.results);
     } catch(e) {
       batch.forEach(d => allResults.push({
-        domain: d, status: '请求失败', code: '—', firstCode: '—', rt: '—', ssl: '—',
+        domain: d, status: '请求失败', code: '—', firstCode: '—', rt: '—', ssl: '—', sslNote: '', sslDays: null,
         note: '无法连接到检测服务', redirect_to: ''
       }));
     }
@@ -331,7 +339,7 @@ function renderTable() {
     allResults.filter(r => statusClass(r.status) === 'err');
 
   if (!filtered.length) {
-    document.getElementById('tbody').innerHTML = '<tr><td colspan="6" class="empty-state">暂无数据</td></tr>';
+    document.getElementById('tbody').innerHTML = '<tr><td colspan="7" class="empty-state">暂无数据</td></tr>';
     return;
   }
 
@@ -339,12 +347,15 @@ function renderTable() {
     const sc = statusClass(r.status);
     const first = r.firstCode ?? '—';
     const redirected = first !== '—' && r.code !== '—' && String(first) !== String(r.code);
+    const sslCls = r.ssl === '✓' ? 'ssl-ok' : r.ssl === '⚠' ? 'ssl-warn' : r.ssl === '✗' ? 'ssl-err' : 'ssl-na';
+    const sslLabel = (r.ssl || '—') + (r.sslNote ? ' ' + r.sslNote : '');
     return `<tr>
       <td class="domain-cell"><a href="${r.url}" target="_blank" rel="noopener">${r.domain}</a></td>
       <td><span class="badge ${sc}">${r.status}</span></td>
       <td class="code-cell ${redirected ? 'first-code' : ''}">${first}</td>
       <td class="code-cell">${r.code}</td>
       <td class="rt-cell">${r.rt}</td>
+      <td class="ssl-cell ${sslCls}" title="${r.sslNote || ''}">${sslLabel}</td>
       <td class="note-cell" title="${r.note}">${r.redirect_to ? '→ ' + r.redirect_to : r.note}</td>
     </tr>`;
   }).join('');
@@ -367,9 +378,9 @@ function setFilter(f, btn) {
 }
 
 function exportCSV() {
-  const header = '域名,状态,首次状态码,最终状态码,响应时间,SSL,说明\n';
+  const header = '域名,状态,首次状态码,最终状态码,响应时间,SSL,SSL说明,说明\n';
   const rows = allResults.map(r =>
-    `"${r.domain}","${r.status}","${r.firstCode ?? '—'}","${r.code}","${r.rt}","${r.ssl}","${r.note}"`
+    `"${r.domain}","${r.status}","${r.firstCode ?? '—'}","${r.code}","${r.rt}","${r.ssl}","${r.sslNote || ''}","${r.note}"`
   ).join('\n');
   const blob = new Blob(['\uFEFF' + header + rows], { type: 'text/csv;charset=utf-8' });
   const a = document.createElement('a');
