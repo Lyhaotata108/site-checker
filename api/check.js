@@ -68,6 +68,105 @@ function normalize(raw) {
   return raw;
 }
 
+// 提取页面标题
+function extractTitle(html) {
+  const m = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html || '');
+  return m ? m[1].replace(/\s+/g, ' ').trim().slice(0, 120) : '';
+}
+
+// 分析正文内容，识别"域名停放/出售、默认服务器页、空白页"等内容异常
+// 这类页面 HTTP 状态码通常是 200，无法靠状态码发现，必须看正文
+function analyzeContent(html, host) {
+  const title = extractTitle(html);
+  const text = (html || '');
+  const lower = text.toLowerCase();
+  const lowerTitle = title.toLowerCase();
+
+  // 去标签后的可见文本长度，判断是否近乎空白
+  const visible = text.replace(/<script[\s\S]*?<\/script>/gi, '')
+                      .replace(/<style[\s\S]*?<\/style>/gi, '')
+                      .replace(/<[^>]+>/g, '')
+                      .replace(/\s+/g, ' ').trim();
+
+  // 域名停放 / 待售 / 抢注页特征
+  const parkingPatterns = [
+    'domain is for sale', 'buy this domain', 'this domain is for sale',
+    'domain for sale', 'is parked', 'parked free', 'domain parking',
+    'purchase this domain', 'the domain', 'sedoparking', 'parkingcrew',
+    'bodis.com', 'afternic', 'dan.com', 'hugedomains', 'godaddy',
+    '该域名', '域名出售', '域名停放', '此域名', '域名正在出售', '域名待售',
+    '本域名', '购买此域名', '米表', '域名可以转让',
+  ];
+
+  // 服务器默认页 / 占位页特征
+  const defaultPatterns = [
+    'welcome to nginx', 'apache2 ubuntu default page', 'apache http server test page',
+    'it works!', 'iis windows server', 'welcome to caddy', 'default web site page',
+    'index of /', 'directory listing for', 'this is the default',
+    'site not found', 'no website configured', 'website is under construction',
+    '建设中', '正在建设', '网站正在建设', '默认站点', '未绑定', '暂未开通',
+    'coming soon', 'under construction',
+  ];
+
+  const hit = (arr) => arr.find(p => lower.includes(p) || lowerTitle.includes(p));
+
+  const parkHit = hit(parkingPatterns);
+  if (parkHit) {
+    return { content: '可疑', contentNote: `疑似域名停放/出售页（命中"${parkHit}"）`, title };
+  }
+  const defHit = hit(defaultPatterns);
+  if (defHit) {
+    return { content: '可疑', contentNote: `疑似默认/占位页（命中"${defHit}"）`, title };
+  }
+  // 近乎空白页
+  if (visible.length < 20) {
+    return { content: '可疑', contentNote: '页面内容近乎空白', title };
+  }
+
+  // 内容与域名不符检测：页面是真实网站，但展示的是"别人的"内容
+  // 思路：取域名核心词，看是否出现在【可见文本+标题】里。
+  // 必须只比对可见文本，因为域名常出现在 canonical/og:url/script 等元信息里（不可见），会造成误判。
+  const mismatch = checkBrandMismatch(host, visible, title);
+  if (mismatch) {
+    return { content: '可疑', contentNote: mismatch, title };
+  }
+
+  return { content: '正常', contentNote: title ? `标题：${title}` : '', title };
+}
+
+// 判断页面可见内容是否与域名品牌相符
+// 返回 null 表示相符（或无法判断），返回字符串表示疑似不符的原因
+function checkBrandMismatch(host, visibleText, title) {
+  // 取主域名（去掉 www 和 TLD），例如 fourseasonsmassage.net -> fourseasonsmassage
+  const parts = host.replace(/^www\./, '').split('.');
+  if (parts.length < 2) return null;
+  const core = parts[parts.length - 2]; // 主体部分
+
+  // 归一化：只保留字母数字，便于比对（页面里可能有空格/连字符）
+  const norm = (s) => (s || '').toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]/g, '');
+  const coreNorm = norm(core);
+  if (coreNorm.length < 4) return null; // 太短的域名（如 jd、qq）跳过，避免误判
+
+  const haystack = norm(title) + ' ' + norm(visibleText);
+
+  // 1) 整体命中：域名核心词作为整体出现在可见文本中 -> 相符
+  if (haystack.includes(coreNorm)) return null;
+
+  // 2) 拆词命中：把域名按常见词边界切分（驼峰、连字符已被归一化），
+  //    退而求其次，看是否大部分"有意义的词片段"出现在页面里。
+  //    用原始 core（含连字符）切分。
+  const segments = core.toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length >= 4);
+  if (segments.length > 0) {
+    const matched = segments.filter(seg => haystack.includes(norm(seg)));
+    // 只要有任意一个有意义的片段命中，就认为相符（保守，避免误报）
+    if (matched.length > 0) return null;
+  }
+
+  // 3) 域名核心词及其片段都没出现在可见文本里 -> 疑似内容与域名不符
+  const shown = (title || visibleText.slice(0, 40)).slice(0, 50);
+  return `内容疑似与域名不符（域名含"${core}"，页面未出现，实际标题："${shown}"）`;
+}
+
 async function checkDns(host) {
   try {
     await dns.lookup(host);
@@ -103,8 +202,21 @@ function fetchUrl(url, redirectCount = 0, firstStatus = null) {
           ...r, firstStatus: first, redirectedFrom: url
         })));
       }
-      res.resume();
-      resolve({ status: code, finalUrl: url, error: null, firstStatus: first });
+      // 捕获正文（最多 ~80KB），用于识别停放/默认页/空白页
+      let body = '';
+      let size = 0;
+      const MAX = 80 * 1024;
+      res.on('data', (chunk) => {
+        size += chunk.length;
+        if (body.length < MAX) body += chunk.toString('utf8');
+        if (size > MAX) { res.destroy(); }
+      });
+      res.on('end', () => {
+        resolve({ status: code, finalUrl: url, error: null, firstStatus: first, body, server: res.headers['server'] || '' });
+      });
+      res.on('close', () => {
+        resolve({ status: code, finalUrl: url, error: null, firstStatus: first, body, server: res.headers['server'] || '' });
+      });
     });
     req.on('timeout', () => { req.destroy(); resolve({ status: 0, finalUrl: url, error: 'timeout', firstStatus }); });
     req.on('error', (e) => resolve({ status: 0, finalUrl: url, error: e.message, firstStatus }));
@@ -119,7 +231,7 @@ async function checkOne(raw) {
     return { domain: raw, url, status: 'URL无效', code: '—', rt: '—', ssl: '—', note: 'URL格式错误', redirect_to: '' };
   }
 
-  const result = { domain: raw, url, status: '', code: '—', firstCode: '—', rt: '—', ssl: url.startsWith('https') ? '✓' : '✗', sslNote: '', sslDays: null, note: '', redirect_to: '' };
+  const result = { domain: raw, url, status: '', code: '—', firstCode: '—', rt: '—', ssl: url.startsWith('https') ? '✓' : '✗', sslNote: '', sslDays: null, content: '—', contentNote: '', title: '', note: '', redirect_to: '' };
 
   const dnsOk = await checkDns(host);
   if (!dnsOk) {
@@ -144,7 +256,7 @@ async function checkOne(raw) {
   }
 
   const t0 = Date.now();
-  const { status, finalUrl, error, firstStatus } = await fetchUrl(url);
+  const { status, finalUrl, error, firstStatus, body } = await fetchUrl(url);
   const rt = Date.now() - t0;
   result.rt = rt + ' ms';
   if (firstStatus) result.firstCode = firstStatus;
@@ -162,7 +274,16 @@ async function checkOne(raw) {
   }
 
   result.code = status;
-  if (status >= 200 && status < 300) return { ...result, status: '正常', note: '网站可正常访问' };
+  if (status >= 200 && status < 300) {
+    const analysis = analyzeContent(body, host);
+    result.content = analysis.content;
+    result.contentNote = analysis.contentNote;
+    result.title = analysis.title;
+    if (analysis.content === '可疑') {
+      return { ...result, status: '内容异常', note: analysis.contentNote };
+    }
+    return { ...result, status: '正常', note: analysis.contentNote || '网站可正常访问' };
+  }
   if (status >= 300 && status < 400) return { ...result, status: '重定向', note: `→ ${finalUrl}` };
   if (status === 401) return { ...result, status: '需要认证', note: '需登录（网站存在）' };
   if (status === 403) return { ...result, status: '禁止访问', note: '403 拒绝（网站存在）' };
