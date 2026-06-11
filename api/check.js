@@ -122,7 +122,49 @@ function analyzeContent(html, host) {
   if (visible.length < 20) {
     return { content: '可疑', contentNote: '页面内容近乎空白', title };
   }
+
+  // 内容与域名不符检测：页面是真实网站，但展示的是"别人的"内容
+  // 思路：取域名核心词，看是否出现在【可见文本+标题】里。
+  // 必须只比对可见文本，因为域名常出现在 canonical/og:url/script 等元信息里（不可见），会造成误判。
+  const mismatch = checkBrandMismatch(host, visible, title);
+  if (mismatch) {
+    return { content: '可疑', contentNote: mismatch, title };
+  }
+
   return { content: '正常', contentNote: title ? `标题：${title}` : '', title };
+}
+
+// 判断页面可见内容是否与域名品牌相符
+// 返回 null 表示相符（或无法判断），返回字符串表示疑似不符的原因
+function checkBrandMismatch(host, visibleText, title) {
+  // 取主域名（去掉 www 和 TLD），例如 fourseasonsmassage.net -> fourseasonsmassage
+  const parts = host.replace(/^www\./, '').split('.');
+  if (parts.length < 2) return null;
+  const core = parts[parts.length - 2]; // 主体部分
+
+  // 归一化：只保留字母数字，便于比对（页面里可能有空格/连字符）
+  const norm = (s) => (s || '').toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]/g, '');
+  const coreNorm = norm(core);
+  if (coreNorm.length < 4) return null; // 太短的域名（如 jd、qq）跳过，避免误判
+
+  const haystack = norm(title) + ' ' + norm(visibleText);
+
+  // 1) 整体命中：域名核心词作为整体出现在可见文本中 -> 相符
+  if (haystack.includes(coreNorm)) return null;
+
+  // 2) 拆词命中：把域名按常见词边界切分（驼峰、连字符已被归一化），
+  //    退而求其次，看是否大部分"有意义的词片段"出现在页面里。
+  //    用原始 core（含连字符）切分。
+  const segments = core.toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length >= 4);
+  if (segments.length > 0) {
+    const matched = segments.filter(seg => haystack.includes(norm(seg)));
+    // 只要有任意一个有意义的片段命中，就认为相符（保守，避免误报）
+    if (matched.length > 0) return null;
+  }
+
+  // 3) 域名核心词及其片段都没出现在可见文本里 -> 疑似内容与域名不符
+  const shown = (title || visibleText.slice(0, 40)).slice(0, 50);
+  return `内容疑似与域名不符（域名含"${core}"，页面未出现，实际标题："${shown}"）`;
 }
 
 async function checkDns(host) {
