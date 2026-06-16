@@ -271,82 +271,80 @@ function analyzeContent(html, host) {
 }
 
 // ─── 手机端检测 ───────────────────────────────────────────────────────────────
+// 只检测「肉眼可见的硬性问题」，不检测可能被正常覆盖的 CSS 特征
 function analyzeMobile(html, mobileStatus, desktopStatus) {
-  const issues = [];
-  const warnings = [];
+  const issues = [];   // 严重：手机端真的不可用
+  const warnings = []; // 提示：可能有问题，但不升级为"需关注"
 
-  // 1. 状态码异常
+  // 1. 手机端访问失败（状态码层面的硬性问题）
   if (mobileStatus === 0) {
-    issues.push('手机端无法访问');
-  } else if (mobileStatus !== desktopStatus && mobileStatus >= 400) {
-    issues.push(`手机端返回 ${mobileStatus}，PC 端正常`);
+    issues.push('手机端无法访问（连接失败）');
+  } else if (mobileStatus >= 400 && mobileStatus !== desktopStatus) {
+    issues.push(`手机端返回 ${mobileStatus}，PC 端返回 ${desktopStatus}`);
   }
 
-  if (!html) return { mobileScore: issues.length === 0 ? '正常' : '异常', mobileIssues: issues, mobileWarnings: warnings };
+  if (!html) {
+    const score = issues.length > 0 ? '异常' : '正常';
+    return { mobileScore: score, mobileIssues: issues, mobileWarnings: warnings, imgCount: 0 };
+  }
 
-  // 2. viewport meta 标签
+  // 2. 缺少 viewport → 这是真正会导致手机端缩放错乱的硬性问题
   const hasViewport = /<meta[^>]+name=["']viewport["'][^>]*>/i.test(html);
-  if (!hasViewport) issues.push('缺少 viewport meta 标签（手机端必然缩放异常）');
-
-  // 3. 响应式 CSS
-  const hasMediaQuery = /@media\s*\(/i.test(html);
-  if (!hasMediaQuery) warnings.push('未检测到响应式 CSS（@media），可能无手机端适配');
-
-  // 4. 固定宽度检测（常见导致手机端溢出）
-  const fixedWidths = [];
-  const fixedRe = /(?:width|min-width)\s*:\s*(\d+)px/gi;
-  let m;
-  while ((m = fixedRe.exec(html)) !== null) {
-    const px = parseInt(m[1]);
-    if (px > 500 && px < 2000) fixedWidths.push(px);
-    if (fixedWidths.length >= 5) break;
-  }
-  if (fixedWidths.length >= 3 && !hasMediaQuery) {
-    warnings.push(`发现 ${fixedWidths.length} 处固定宽度（${fixedWidths.slice(0,3).join('/')}px），手机端可能横向溢出`);
+  if (!hasViewport) {
+    issues.push('缺少 viewport meta 标签，手机端页面会缩小显示');
   }
 
-  // 5. 图片检测（src 是否有 alt，是否有 lazy load）
+  // 3. 页面完全没有任何图片（img + background-image 都没有）→ 落地页视觉内容缺失
   const imgTags = html.match(/<img[^>]+>/gi) || [];
-  const missingAlt = imgTags.filter(t => !/alt\s*=/i.test(t));
-  const imgSrcs = imgTags.map(t => { const m = /src=["']([^"']+)["']/i.exec(t); return m ? m[1] : null; }).filter(Boolean);
-
-  // 落地页关键图检测：首屏 img 是否存在
-  if (imgTags.length === 0) {
-    warnings.push('页面无图片，落地页可能缺少视觉内容');
-  } else if (imgTags.length > 0 && missingAlt.length === imgTags.length) {
-    warnings.push(`${imgTags.length} 张图片均缺少 alt 属性`);
+  const hasBgImage = /background-image\s*:\s*url\s*\(/i.test(html);
+  if (imgTags.length === 0 && !hasBgImage) {
+    warnings.push('页面无图片内容（含背景图），落地页视觉可能缺失');
   }
 
-  // 6. 字体大小（手机端 <12px 会很难读）
-  const tinyFont = /font-size\s*:\s*([1-9]|1[01])px/i.test(html);
-  if (tinyFont) warnings.push('存在 <12px 字体，手机端可读性差');
-
-  // 7. 点击目标（小于 44px 的按钮/链接）
-  const smallTap = html.match(/(?:height|width)\s*:\s*([1-3]\d)px/gi) || [];
-  if (smallTap.length >= 3) warnings.push('存在多处小尺寸元素，手机端点击区域可能过小');
-
-  // 8. 水平滚动检测
-  const overflowX = /overflow-x\s*:\s*(?:scroll|auto)/i.test(html);
-  if (overflowX) warnings.push('CSS 存在 overflow-x:scroll/auto，手机端可能出现横向滚动');
-
-  const score = issues.length > 0 ? '异常' : warnings.length > 0 ? '需关注' : '正常';
+  // 只有 issues（硬性问题）才影响得分，warnings 仅记录不升级
+  const score = issues.length > 0 ? '异常' : '正常';
   return { mobileScore: score, mobileIssues: issues, mobileWarnings: warnings, imgCount: imgTags.length };
 }
 
-// ─── 图片资源可用性检测（抽查首屏 img src）────────────────────────────────────
+// ─── 图片资源可用性检测 ───────────────────────────────────────────────────────
+// 同时扫描 <img src> 和 background-image: url(...)
 async function checkImages(html, baseUrl) {
+  const imgUrls = new Set();
+
+  // 来源1：<img src="...">
   const imgTags = html.match(/<img[^>]+>/gi) || [];
-  const srcs = imgTags
-    .map(t => { const m = /src=["']([^"'#?]+)["']/i.exec(t); return m ? m[1] : null; })
-    .filter(Boolean)
+  for (const tag of imgTags) {
+    // 支持 src 和 data-src（懒加载）
+    const m = /(?:data-src|src)=["']([^"'#?]+)["']/i.exec(tag);
+    if (m) imgUrls.add(m[1]);
+  }
+
+  // 来源2：扫描所有 CSS url()，覆盖以下所有写法：
+  //   background-image: url("...")
+  //   background: linear-gradient(...), url('...')
+  //   background: url(...) no-repeat center
+  // 直接全局匹配 url(...)，不限制前缀属性名
+  const bgRe = /url\(\s*["']?([^"')#?\s]+)["']?\s*\)/gi;
+  let bm;
+  while ((bm = bgRe.exec(html)) !== null) {
+    const u = bm[1].trim();
+    // 只保留看起来像图片的 URL（有扩展名或明确是图片路径）
+    if (/\.(jpe?g|png|webp|avif|bmp|tiff?)([?#]|$)/i.test(u) || u.startsWith('http')) {
+      imgUrls.add(u);
+    }
+  }
+
+  // 过滤：去掉 data URI、SVG 占位、明显的 icon 小图
+  const srcs = [...imgUrls]
     .filter(s => !s.startsWith('data:'))
-    .slice(0, 6); // 最多检查6张
+    .filter(s => !/\.(ico|svg|gif)(\?|$)/i.test(s))
+    .slice(0, 8); // 最多检查8个
 
   if (srcs.length === 0) return { checked: 0, broken: [], ok: 0 };
 
   const results = await Promise.all(srcs.map(async (src) => {
     let fullUrl;
-    try { fullUrl = new URL(src, baseUrl).toString(); } catch { return { src, ok: false, reason: 'URL无效' }; }
+    try { fullUrl = new URL(src, baseUrl).toString(); } catch { return { src, ok: false }; }
     return new Promise((resolve) => {
       const parsed = new URL(fullUrl);
       const mod = parsed.protocol === 'https:' ? https : http;
@@ -354,11 +352,9 @@ async function checkImages(html, baseUrl) {
         hostname: parsed.hostname, path: parsed.pathname + parsed.search,
         method: 'HEAD', timeout: 6000, rejectUnauthorized: false,
         headers: { 'User-Agent': UA_MOBILE },
-      }, (res) => {
-        resolve({ src, ok: res.statusCode < 400, status: res.statusCode });
-      });
-      req.on('timeout', () => { req.destroy(); resolve({ src, ok: false, reason: '超时' }); });
-      req.on('error', () => resolve({ src, ok: false, reason: '连接失败' }));
+      }, (res) => resolve({ src, ok: res.statusCode < 400, status: res.statusCode }));
+      req.on('timeout', () => { req.destroy(); resolve({ src, ok: false }); });
+      req.on('error', () => resolve({ src, ok: false }));
       req.end();
     });
   }));
@@ -428,30 +424,27 @@ async function checkOne(raw) {
     base.title        = analysis.title;
     base.reviewReason = analysis.reviewReason;
 
-    // 手机端分析
+    // 手机端分析（只有硬性问题才影响状态：连接失败 / 缺少viewport）
     const mob = analyzeMobile(mobile.body || '', mobile.status || 0, desktop.status);
     base.mobileScore = mob.mobileScore;
-    const mobParts = [...mob.mobileIssues, ...mob.mobileWarnings];
-    base.mobileNote = mobParts.slice(0, 3).join('；') || '手机端正常';
-    if (mob.imgCount !== undefined) base.imgChecked = mob.imgCount;
+    base.mobileNote  = mob.mobileIssues.join('；') || '正常';
 
-    // 图片可用性检测
+    // 图片可用性检测（img + background-image）
     const imgResult = await checkImages(mobile.body || desktop.body || '', desktop.finalUrl || url);
     base.imgBroken  = imgResult.broken.length;
     base.imgChecked = imgResult.checked;
+    // 图片缺失只记录到 mobileNote，不改变手机端评分和整体状态
+    // 原因：HEAD 请求常被 CDN/防盗链拦截产生误报，视觉是否缺失需人工确认
     if (imgResult.broken.length > 0) {
-      base.mobileNote = (base.mobileNote ? base.mobileNote + '；' : '') + `${imgResult.broken.length}张图片无法加载（${imgResult.broken.slice(0,2).join('、')}）`;
-      if (base.mobileScore === '正常') base.mobileScore = '需关注';
+      base.mobileNote += (base.mobileNote !== '正常' ? '；' : '') +
+        `${imgResult.broken.length}/${imgResult.checked} 张图片请求失败（可能被防盗链拦截，建议人工确认）`;
     }
 
     // 最终状态
-    if (analysis.content === '可疑') return { ...base, status:'内容异常', note:analysis.contentNote };
-    if (analysis.content === '待审核') return { ...base, status:'待审核', note:analysis.reviewReason || analysis.contentNote };
-    if (mob.mobileScore === '异常') return { ...base, status:'手机端异常', note:mob.mobileIssues[0] || '手机端访问异常' };
-
-    // 手机端问题降级为"需关注"
-    const extraWarn = mob.mobileScore !== '正常' || base.imgBroken > 0;
-    return { ...base, status: extraWarn ? '需关注' : '正常', note: analysis.contentNote || '网站可正常访问' };
+    if (analysis.content === '可疑')   return { ...base, status:'内容异常',  note:analysis.contentNote };
+    if (analysis.content === '待审核') return { ...base, status:'待审核',    note:analysis.reviewReason || analysis.contentNote };
+    if (mob.mobileScore === '异常')    return { ...base, status:'手机端异常', note:mob.mobileIssues[0] || '手机端访问异常' };
+    return { ...base, status:'正常', note: analysis.contentNote || '网站可正常访问' };
   }
 
   if (desktop.status >= 300 && desktop.status < 400) return { ...base, status:'重定向', note:`→ ${desktop.finalUrl}` };
