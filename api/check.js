@@ -204,59 +204,65 @@ function analyzeContent(html, host) {
         return { content: '正常', contentNote: `标题：${title}`, title, reviewReason: '' };
       }
 
-      // ── 第二：标题子串匹配（处理缩写/前缀场景）─────────────────────────────
-      // 域名 "svillage-spa" → coreNorm="svillagespa"，标题 "S Village Spa" → normTitle包含"svillage"
-      // 取域名去掉通用行业词后的剩余部分，看是否在标题里
-      const domainWords = splitDomainWords(core); // 按词典拆分
-      const nonGeneric = domainWords.filter(w => !GENERIC_WORDS.has(w)); // 过滤通用词，保留特征词
+      // ── 第二：拆词比例匹配 ────────────────────────────────────────────────────
+      // 把域名按连字符 + 词典拆成词列表，统计有多少词出现在标题里
+      // 这样能处理：
+      //   词序不同：bodytherapyandreflexology → title 里有 body/therapy/reflexology
+      //   标题比域名短：aromamassage-spa → title "Aroma Massage" 含 aroma+massage
+      //   全通用词域名：bay-spamassage → title "Bay Spa" 含 bay+spa
+      const domainWords = splitDomainWords(core);
+      const allWordNorms = domainWords.map(norm).filter(w => w.length >= 2);
+      const nonGeneric   = domainWords.filter(w => !GENERIC_WORDS.has(w));
       const normNonGeneric = nonGeneric.map(norm).filter(w => w.length >= 2);
 
-      if (normNonGeneric.length > 0) {
-        // 所有非通用词都能在标题里找到 → 正常
-        const allInTitle = normNonGeneric.every(w => normTitle.includes(w));
-        if (allInTitle) {
-          return { content: '正常', contentNote: `标题：${title}`, title, reviewReason: '' };
-        }
-        // 至少一个非通用词在标题里 → 正常（部分匹配即可，避免拆词误差）
-        const someInTitle = normNonGeneric.some(w => normTitle.includes(w));
-        if (someInTitle) {
-          return { content: '正常', contentNote: `标题：${title}`, title, reviewReason: '' };
-        }
+      function wordMatchRatio(haystack) {
+        if (allWordNorms.length === 0) return 0;
+        const matched = allWordNorms.filter(w => haystack.includes(w));
+        return matched.length / allWordNorms.length;
       }
 
-      // ── 第三：可见正文匹配（标题没有时兜底）────────────────────────────────
-      const normVisible = norm(visible);
-      const haystackFull = normTitle + normVisible;
-
-      // 域名整体在正文里出现
-      if (haystackFull.includes(coreNorm)) {
+      // 标题里匹配比例 ≥ 50% → 正常（超过一半的域名词出现在标题里，基本可以确认）
+      const titleRatio = wordMatchRatio(normTitle);
+      if (titleRatio >= 0.5) {
         return { content: '正常', contentNote: `标题：${title}`, title, reviewReason: '' };
       }
 
-      // 非通用词在正文里出现（品牌词命中）
+      // 非通用词：有任意一个命中标题 → 正常（品牌专有词命中权重更高）
+      if (normNonGeneric.length > 0 && normNonGeneric.some(w => normTitle.includes(w))) {
+        return { content: '正常', contentNote: `标题：${title}`, title, reviewReason: '' };
+      }
+
+      // ── 第三：正文兜底匹配 ────────────────────────────────────────────────────
+      const normVisible = norm(visible);
+      const haystackFull = normTitle + normVisible;
+
+      if (haystackFull.includes(coreNorm)) {
+        return { content: '正常', contentNote: `标题：${title}`, title, reviewReason: '' };
+      }
+      if (wordMatchRatio(haystackFull) >= 0.5) {
+        return { content: '正常', contentNote: `标题：${title}`, title, reviewReason: '' };
+      }
       if (normNonGeneric.length > 0 && normNonGeneric.some(w => w.length >= 3 && haystackFull.includes(w))) {
         return { content: '正常', contentNote: `标题：${title}`, title, reviewReason: '' };
       }
 
-      // ── 第四：标题完全是停放/广告内容（无有效标题）→ 可疑 ──────────────────
+      // ── 第四：无有效标题 → 可疑 ──────────────────────────────────────────────
       if (!title || title.length < 3) {
         return { content: '可疑', contentNote: '页面无标题，内容不明', title, reviewReason: '' };
       }
 
-      // ── 第五：有标题但完全匹配不上域名 → 判断是否值得人工审核 ───────────────
-      // 只有停放页才会出现"标题和域名完全无关"，正常网站标题一定包含品牌词
-      // 但也存在例外（品牌只用图片展示），所以进人工审核而非直接标可疑
-      const allGeneric = nonGeneric.length === 0; // 域名全由通用词组成
+      // ── 第五：标题和正文都匹配不上 → 按域名类型区分处理 ─────────────────────
+      const allGeneric = nonGeneric.length === 0;
       if (allGeneric) {
-        // 全通用词域名（如 best-massage、top-spa），标题没命中 → 无法自动判断
+        // 全通用词域名，自动判断本就不可靠，进人工审核
         return {
           content: '待审核',
-          contentNote: `域名由通用词组成，标题未包含域名关键词`,
+          contentNote: `域名词未充分出现在页面中`,
           title,
-          reviewReason: `域名"${core}"全由通用词组成，无法自动验证；页面标题："${title}"`,
+          reviewReason: `域名"${core}"由通用词组成，词典匹配比例 ${Math.round(titleRatio*100)}%；页面标题："${title}"`,
         };
       } else {
-        // 有非通用词但标题和正文都没命中 → 内容可疑
+        // 有专有词但完全没命中 → 可疑（真正的停放/劫持页）
         return {
           content: '可疑',
           contentNote: `域名关键词未出现在标题或页面中（标题："${title.slice(0, 60)}"）`,
