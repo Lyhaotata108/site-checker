@@ -185,54 +185,83 @@ function analyzeContent(html, host) {
   // 3. 近乎空白 → 可疑
   if (visible.length < 20) return { content: '可疑', contentNote: '页面内容近乎空白', title, reviewReason: '' };
 
-  // 4. 品牌词匹配
+  // 4. 品牌匹配
+  // 归一化：只保留字母和数字（去掉连字符、空格、大小写）
+  // 这样 "a1-massage" == "a1 massage" == "A1 Massage" == "A1Massage"
+  const norm = (s) => (s || '').toLowerCase().replace(/\+/g, 'plus').replace(/[^a-z0-9]/g, '');
+
   const parts = host.replace(/^www\./, '').split('.');
   if (parts.length >= 2) {
-    const core = parts[parts.length - 2];
-    if (core && core.length >= 3) {
-      const norm = (s) => (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-      const haystack = norm(title) + ' ' + norm(visible);
-      const words = splitDomainWords(core);
-      const brandWords  = words.filter(w => w.length >= 4 && !GENERIC_WORDS.has(w));
-      const genericWords = words.filter(w => GENERIC_WORDS.has(w));
+    const core = parts[parts.length - 2]; // 如 "a1-massage"、"bluesky-massage"、"svillage-spa"
+    if (core && core.length >= 2) {
+      const coreNorm = norm(core); // "a1massage"、"blueskymassage"、"svillagespa"
 
-      if (brandWords.length > 0) {
-        const brandHit = brandWords.some(w => haystack.includes(norm(w)));
-        if (brandHit) {
-          // 品牌词命中 → 正常
-        } else {
-          const genericHit = genericWords.some(w => haystack.includes(norm(w)));
-          const longBrands = brandWords.filter(w => w.length >= 5);
-          if (longBrands.length > 0 && !genericHit) {
-            // 品牌词+行业词都未命中 → 可疑
-            return { content: '可疑', contentNote: `品牌词"${longBrands.join('/')}"及行业词均未出现`, title, reviewReason: '' };
-          } else if (longBrands.length > 0) {
-            // 有行业词但无品牌词 → 不确定，转人工
-            return {
-              content: '待审核',
-              contentNote: `品牌词"${longBrands.join('/')}"未出现，页面有行业词但内容待确认`,
-              title,
-              reviewReason: `域名含品牌词"${longBrands.join('/')}"，但页面未出现该词；页面标题："${title || '（无标题）'}"`,
-            };
-          }
-          // 品牌词太短 → 无法判断，待审核
-          if (brandWords.length > 0) {
-            return {
-              content: '待审核',
-              contentNote: `品牌词"${brandWords.join('/')}"较短（<5字符），无法自动判断`,
-              title,
-              reviewReason: `域名品牌词"${brandWords.join('/')}"太短，自动匹配不可靠；页面标题："${title || '（无标题）'}"`,
-            };
-          }
+      // ── 第一优先：标题匹配（最可靠的信号）──────────────────────────────────
+      // 域名就是店铺名的拼写，标题里大概率有完整店名
+      // 例：core="a1-massage" coreNorm="a1massage"，title="A1 Massage - ..." → normTitle="a1massage..." → 命中
+      const normTitle = norm(title);
+      if (normTitle && normTitle.includes(coreNorm)) {
+        return { content: '正常', contentNote: `标题：${title}`, title, reviewReason: '' };
+      }
+
+      // ── 第二：标题子串匹配（处理缩写/前缀场景）─────────────────────────────
+      // 域名 "svillage-spa" → coreNorm="svillagespa"，标题 "S Village Spa" → normTitle包含"svillage"
+      // 取域名去掉通用行业词后的剩余部分，看是否在标题里
+      const domainWords = splitDomainWords(core); // 按词典拆分
+      const nonGeneric = domainWords.filter(w => !GENERIC_WORDS.has(w)); // 过滤通用词，保留特征词
+      const normNonGeneric = nonGeneric.map(norm).filter(w => w.length >= 2);
+
+      if (normNonGeneric.length > 0) {
+        // 所有非通用词都能在标题里找到 → 正常
+        const allInTitle = normNonGeneric.every(w => normTitle.includes(w));
+        if (allInTitle) {
+          return { content: '正常', contentNote: `标题：${title}`, title, reviewReason: '' };
+        }
+        // 至少一个非通用词在标题里 → 正常（部分匹配即可，避免拆词误差）
+        const someInTitle = normNonGeneric.some(w => normTitle.includes(w));
+        if (someInTitle) {
+          return { content: '正常', contentNote: `标题：${title}`, title, reviewReason: '' };
         }
       }
-      // 全通用词 → 无法判断，待审核
-      if (brandWords.length === 0 && genericWords.length > 0) {
+
+      // ── 第三：可见正文匹配（标题没有时兜底）────────────────────────────────
+      const normVisible = norm(visible);
+      const haystackFull = normTitle + normVisible;
+
+      // 域名整体在正文里出现
+      if (haystackFull.includes(coreNorm)) {
+        return { content: '正常', contentNote: `标题：${title}`, title, reviewReason: '' };
+      }
+
+      // 非通用词在正文里出现（品牌词命中）
+      if (normNonGeneric.length > 0 && normNonGeneric.some(w => w.length >= 3 && haystackFull.includes(w))) {
+        return { content: '正常', contentNote: `标题：${title}`, title, reviewReason: '' };
+      }
+
+      // ── 第四：标题完全是停放/广告内容（无有效标题）→ 可疑 ──────────────────
+      if (!title || title.length < 3) {
+        return { content: '可疑', contentNote: '页面无标题，内容不明', title, reviewReason: '' };
+      }
+
+      // ── 第五：有标题但完全匹配不上域名 → 判断是否值得人工审核 ───────────────
+      // 只有停放页才会出现"标题和域名完全无关"，正常网站标题一定包含品牌词
+      // 但也存在例外（品牌只用图片展示），所以进人工审核而非直接标可疑
+      const allGeneric = nonGeneric.length === 0; // 域名全由通用词组成
+      if (allGeneric) {
+        // 全通用词域名（如 best-massage、top-spa），标题没命中 → 无法自动判断
         return {
           content: '待审核',
-          contentNote: '域名全由通用行业词组成，无法自动判断品牌相符性',
+          contentNote: `域名由通用词组成，标题未包含域名关键词`,
           title,
-          reviewReason: `域名"${core}"由通用词组成（${genericWords.slice(0,3).join('+')}），无品牌词可验证；页面标题："${title || '（无标题）'}"`,
+          reviewReason: `域名"${core}"全由通用词组成，无法自动验证；页面标题："${title}"`,
+        };
+      } else {
+        // 有非通用词但标题和正文都没命中 → 内容可疑
+        return {
+          content: '可疑',
+          contentNote: `域名关键词未出现在标题或页面中（标题："${title.slice(0, 60)}"）`,
+          title,
+          reviewReason: '',
         };
       }
     }
