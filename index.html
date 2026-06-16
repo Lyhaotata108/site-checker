@@ -312,8 +312,11 @@ function renderTable() {
     // 图片列
     const imgBroken = r.imgBroken || 0;
     const imgChecked = r.imgChecked || 0;
-    const imgCls = imgChecked===0?'img-na':imgBroken>0?'img-warn':'img-ok';
-    const imgLabel = imgChecked===0?'—':(imgBroken>0?`✕ ${imgBroken}/${imgChecked} 缺失`:`✓ ${imgChecked} 正常`);
+    // 图片缺失不再标红警告，只展示数量；缺失情况已记录在 mobileNote 里
+    const imgCls = imgChecked === 0 ? 'img-na' : 'img-ok';
+    const imgLabel = imgChecked === 0 ? '—' : (imgBroken > 0
+      ? `${imgChecked - imgBroken}/${imgChecked} 可用`
+      : `✓ ${imgChecked} 正常`);
 
     // 手动审核标记
     const mv = manualReviews[r.domain];
