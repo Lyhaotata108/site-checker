@@ -89,7 +89,36 @@ function extractTitle(html) {
   return m ? m[1].replace(/\s+/g, ' ').trim().slice(0, 120) : '';
 }
 
-// ─── 可见文本 ─────────────────────────────────────────────────────────────────
+// ─── 提取品牌搜索用的全量文本 ──────────────────────────────────────────────────
+// 比 visibleText 更全：额外提取 alt/title属性、meta description/keywords/og:title
+// 这样品牌词出现在 logo alt、h1、导航、footer、meta 任何地方都能命中
+function extractBrandHaystack(html) {
+  const h = html || '';
+
+  // 1. alt="..." 和 title="..." 属性值（logo、图片描述里常有品牌名）
+  const attrTexts = [];
+  const attrRe = /\b(?:alt|title)\s*=\s*["']([^"']{2,100})["']/gi;
+  let am;
+  while ((am = attrRe.exec(h)) !== null) attrTexts.push(am[1]);
+
+  // 2. meta name="description/keywords" 和 og:title / og:site_name
+  const metaRe = /<meta[^>]+(?:name|property)\s*=\s*["'](?:description|keywords|og:title|og:site_name|twitter:title)[^>]*content\s*=\s*["']([^"']{2,200})["'][^>]*>/gi;
+  const metaRe2 = /<meta[^>]+content\s*=\s*["']([^"']{2,200})["'][^>]*(?:name|property)\s*=\s*["'](?:description|keywords|og:title|og:site_name|twitter:title)["'][^>]*>/gi;
+  let mm;
+  while ((mm = metaRe.exec(h)) !== null)  attrTexts.push(mm[1]);
+  while ((mm = metaRe2.exec(h)) !== null) attrTexts.push(mm[1]);
+
+  // 3. 可见正文（去掉 script/style 后剥离标签）
+  const visible = h
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ').trim();
+
+  return (attrTexts.join(' ') + ' ' + visible).slice(0, 200000);
+}
+
+// ─── 可见文本（用于停放页检测，保持原逻辑）────────────────────────────────────
 function visibleText(html) {
   return (html || '')
     .replace(/<script[\s\S]*?<\/script>/gi, '')
@@ -171,6 +200,8 @@ function analyzeContent(html, host) {
   const lower = (html || '').toLowerCase();
   const lowerTitle = title.toLowerCase();
   const visible = visibleText(html);
+  // 品牌匹配用全量文本（含 alt/meta/og），比纯可见文本覆盖更全
+  const brandHaystack = extractBrandHaystack(html);
 
   const hit = (arr) => arr.find(p => lower.includes(p) || lowerTitle.includes(p));
 
@@ -182,25 +213,81 @@ function analyzeContent(html, host) {
   const defHit = hit(DEFAULT_PATTERNS);
   if (defHit) return { content: '可疑', contentNote: `疑似默认/占位页（"${defHit}"）`, title, reviewReason: '' };
 
-  // 3. 近乎空白 → 可疑
-  if (visible.length < 20) return { content: '可疑', contentNote: '页面内容近乎空白', title, reviewReason: '' };
+  // 3. 内容太少 → 区分两种情况
+  // a) 完全空白（<20字符）且无标题 → 真的空页面，可疑
+  // b) 有标题但正文很短 → 可能是 WAF/CDN 拦截了爬虫返回了空壳，不能直接判异常
+  if (visible.length < 20) {
+    if (!title || title.length < 3) {
+      return { content: '可疑', contentNote: '页面内容近乎空白', title, reviewReason: '' };
+    }
+    // 有标题说明页面真实存在，只是内容被反爬拦截，进待审核
+    return {
+      content: '待审核',
+      contentNote: '页面正文被反爬拦截，仅获取到标题',
+      title,
+      reviewReason: `服务器可能对自动检测做了拦截，仅能读取到标题："${title}"，建议人工打开确认`,
+    };
+  }
 
   // 4. 品牌匹配
   // 归一化：只保留字母和数字（去掉连字符、空格、大小写）
   // 这样 "a1-massage" == "a1 massage" == "A1 Massage" == "A1Massage"
-  const norm = (s) => (s || '').toLowerCase().replace(/\+/g, 'plus').replace(/[^a-z0-9]/g, '');
+  // 归一化：西里尔/希腊字母 → ASCII 近似字符，再去掉非字母数字
+  // 处理品牌名使用了视觉相似字符的情况（如 е=1077 是西里尔字母，看起来像 e）
+  const CONFUSABLES = {'а':'a','е':'e','о':'o','р':'p','с':'c','х':'x','у':'y',
+    'і':'i','ѕ':'s','ɑ':'a','ɡ':'g','ℬ':'b','ℰ':'e','ℱ':'f','ℋ':'h','ℐ':'i',
+    'ℒ':'l','ℳ':'m','ℛ':'r','ℬ':'b','à':'a','á':'a','â':'a','ã':'a','ä':'a',
+    'å':'a','è':'e','é':'e','ê':'e','ë':'e','ì':'i','í':'i','î':'i','ï':'i',
+    'ò':'o','ó':'o','ô':'o','õ':'o','ö':'o','ù':'u','ú':'u','û':'u','ü':'u',
+    'ý':'y','ñ':'n','ç':'c',
+  };
+  const norm = (s) => {
+    if (!s) return '';
+    // 先把已知混淆字符替换为 ASCII
+    let r = s.toLowerCase();
+    for (const [k, v] of Object.entries(CONFUSABLES)) r = r.split(k).join(v);
+    return r.replace(/\+/g, 'plus').replace(/[^a-z0-9]/g, '');
+  };
+
+  // 常见地理缩写后缀（美国州缩写 + 部分城市缩写），注册域名时常附在品牌名后
+  // footyrootysc → sc=South Carolina，剥离后得到真正的品牌词 footyrooty
+  const GEO_SUFFIXES = new Set([
+    'sc','nc','ny','nj','la','ca','tx','fl','ga','va','pa','oh','mi','il','wa',
+    'az','co','ut','nv','or','mn','mo','wi','in','tn','md','ma','ct','ky','al',
+    'ok','ar','ia','ms','ks','ne','id','mt','nd','sd','wv','nm','me','nh','vt',
+    'wy','ak','hi','dc','pr',
+    // 城市常见缩写
+    'nyc','atl','chi','hou','phx','sea','pdx','lax','sfb','dfw','mia','bos',
+    'mtl','van','tor',
+  ]);
 
   const parts = host.replace(/^www\./, '').split('.');
   if (parts.length >= 2) {
-    const core = parts[parts.length - 2]; // 如 "a1-massage"、"bluesky-massage"、"svillage-spa"
+    const core = parts[parts.length - 2]; // 如 "a1-massage"、"footyrootysc"
     if (core && core.length >= 2) {
-      const coreNorm = norm(core); // "a1massage"、"blueskymassage"、"svillagespa"
+      const coreNorm = norm(core);
+
+      // 尝试剥离地理后缀，生成候选核心词列表
+      // footyrootysc → [footyrootysc, footyrooty]（sc是后缀）
+      const coreCandidates = [coreNorm];
+      const coreParts = core.toLowerCase().split('-');
+      const lastPart = coreParts[coreParts.length - 1];
+      if (GEO_SUFFIXES.has(lastPart) && coreParts.length > 1) {
+        // 连字符分割的最后一段是地理缩写：jinye-spas-sc → jinye-spas
+        coreCandidates.push(norm(coreParts.slice(0, -1).join('-')));
+      } else {
+        // 无连字符时从末尾截：footyrootysc → 尝试去掉2-3字符后缀
+        for (const sfx of GEO_SUFFIXES) {
+          if (coreNorm.endsWith(sfx) && coreNorm.length > sfx.length + 3) {
+            coreCandidates.push(coreNorm.slice(0, -sfx.length));
+            break;
+          }
+        }
+      }
 
       // ── 第一优先：标题匹配（最可靠的信号）──────────────────────────────────
-      // 域名就是店铺名的拼写，标题里大概率有完整店名
-      // 例：core="a1-massage" coreNorm="a1massage"，title="A1 Massage - ..." → normTitle="a1massage..." → 命中
       const normTitle = norm(title);
-      if (normTitle && normTitle.includes(coreNorm)) {
+      if (normTitle && coreCandidates.some(c => normTitle.includes(c))) {
         return { content: '正常', contentNote: `标题：${title}`, title, reviewReason: '' };
       }
 
@@ -232,11 +319,17 @@ function analyzeContent(html, host) {
         return { content: '正常', contentNote: `标题：${title}`, title, reviewReason: '' };
       }
 
-      // ── 第三：正文兜底匹配 ────────────────────────────────────────────────────
-      const normVisible = norm(visible);
-      const haystackFull = normTitle + normVisible;
+      // ── 第三：全量文本兜底匹配（alt/meta/og/正文全覆盖）─────────────────────
+      // 品牌词可能只出现在 logo alt、meta description、og:title、h1、footer 里
+      // 用 extractBrandHaystack 比纯可见文本覆盖更全，避免漏判
+      const normBrand = norm(brandHaystack);
+      const haystackFull = normTitle + normBrand;
 
       if (haystackFull.includes(coreNorm)) {
+        return { content: '正常', contentNote: `标题：${title}`, title, reviewReason: '' };
+      }
+      // 候选词（含地理缩写剥离后的版本）任意命中
+      if (coreCandidates.some(c => c !== coreNorm && haystackFull.includes(c))) {
         return { content: '正常', contentNote: `标题：${title}`, title, reviewReason: '' };
       }
       if (wordMatchRatio(haystackFull) >= 0.5) {
@@ -246,9 +339,16 @@ function analyzeContent(html, host) {
         return { content: '正常', contentNote: `标题：${title}`, title, reviewReason: '' };
       }
 
-      // ── 第四：无有效标题 → 可疑 ──────────────────────────────────────────────
+      // ── 第四：无有效标题，但正文有内容 ─────────────────────────────────────────
+      // 有些网站用 JS 动态渲染标题，服务端返回的 HTML 里 <title> 是空的
+      // 正文匹配前面已经做过，到这里说明正文里也没命中 → 待审核而非直接可疑
       if (!title || title.length < 3) {
-        return { content: '可疑', contentNote: '页面无标题，内容不明', title, reviewReason: '' };
+        return {
+          content: '待审核',
+          contentNote: '页面无标题（可能由 JS 动态渲染），建议人工打开确认',
+          title,
+          reviewReason: `域名"${core}"的页面未检测到 <title> 标签，可能使用了 JS 渲染，自动检测无法判断内容`,
+        };
       }
 
       // ── 第五：标题和正文都匹配不上 → 按域名类型区分处理 ─────────────────────
