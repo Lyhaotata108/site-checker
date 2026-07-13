@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>网站维护状态管理</title>
+<style>
+html,body{width:100%;height:100%;margin:0;background:#0e0e10;overflow:hidden}iframe{width:100%;height:100%;border:0;display:block}
+</style>
+</head>
+<body>
+<iframe id="appFrame" src="/manager.html?compact-source=1" title="网站维护状态管理"></iframe>
+<script>
+'use strict';
+const frame=document.getElementById('appFrame');
+frame.addEventListener('load',()=>{
+  const doc=frame.contentDocument;
+  if(!doc)return;
+  const style=doc.createElement('style');
+  style.textContent=`
+    .compact-collapsed .compact-body{display:none!important}
+    .compact-collapsed>.card-head{border-bottom:0!important}
+    .compact-toggle{min-width:74px!important}
+    .compact-toggle .compact-arrow{display:inline-block;transition:transform .18s}
+    .compact-card:not(.compact-collapsed) .compact-toggle .compact-arrow{transform:rotate(180deg)}
+    .table-shell{max-height:min(62vh,680px)!important;overflow:auto!important;overscroll-behavior:contain;scrollbar-gutter:stable}
+    .table-shell th{position:sticky!important;top:0!important;z-index:5!important;background:var(--surface2)!important}
+    @media(max-width:620px){.table-shell{max-height:58vh!important}.compact-toggle{flex:0 0 auto!important}}
+  `;
+  doc.head.appendChild(style);
+  const cards=[...doc.querySelectorAll('section.card')];
+  const targets=[
+    {card:cards[0],key:'add',collapsed:true},
+    {card:cards[1],key:'library',collapsed:false},
+    {card:doc.getElementById('resultCard'),key:'results',collapsed:false}
+  ];
+  let saved={};
+  try{saved=JSON.parse(localStorage.getItem('siteCheckerCompactUiV1')||'{}')}catch{}
+  const persist=()=>{
+    const state={};
+    targets.forEach(item=>{if(item.card)state[item.key]=item.card.classList.contains('compact-collapsed')});
+    localStorage.setItem('siteCheckerCompactUiV1',JSON.stringify(state));
+  };
+  targets.forEach(item=>{
+    const card=item.card;if(!card||card.dataset.compactReady)return;
+    card.dataset.compactReady='1';card.classList.add('compact-card');
+    const head=card.querySelector(':scope > .card-head');if(!head)return;
+    const body=doc.createElement('div');body.className='compact-body';
+    while(head.nextSibling)body.appendChild(head.nextSibling);
+    card.appendChild(body);
+    const button=doc.createElement('button');button.type='button';button.className='btn compact-toggle';
+    button.innerHTML='<span class="compact-arrow">⌄</span><span class="compact-text"></span>';
+    const actionBox=head.querySelector('.actions')||head;actionBox.appendChild(button);
+    const setCollapsed=value=>{
+      card.classList.toggle('compact-collapsed',value);
+      button.setAttribute('aria-expanded',String(!value));
+      button.querySelector('.compact-text').textContent=value?'展开':'收起';
+    };
+    setCollapsed(Object.prototype.hasOwnProperty.call(saved,item.key)?!!saved[item.key]:item.collapsed);
+    button.addEventListener('click',()=>{setCollapsed(!card.classList.contains('compact-collapsed'));persist()});
+  });
+});
+</script>
+</body>
+</html>
