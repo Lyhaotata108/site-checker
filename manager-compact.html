@@ -15,7 +15,17 @@ html,body{width:100%;height:100%;margin:0;background:#0e0e10;overflow:hidden}ifr
 const frame=document.getElementById('appFrame');
 frame.addEventListener('load',()=>{
   const doc=frame.contentDocument;
-  if(!doc)return;
+  const appWindow=frame.contentWindow;
+  if(!doc||!appWindow)return;
+
+  // manager.html 原先请求 /api/check；该路径会被 Vercel 的旧物理函数优先命中。
+  // 在紧凑版中强制切到已包含品牌误判修复的 /api/check-v2。
+  const originalFetch=appWindow.fetch.bind(appWindow);
+  appWindow.fetch=(input,init)=>{
+    const target=typeof input==='string'&&input==='/api/check'?'/api/check-v2':input;
+    return originalFetch(target,init);
+  };
+
   const style=doc.createElement('style');
   style.textContent=`
     .compact-collapsed .compact-body{display:none!important}
