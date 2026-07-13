@@ -1,6 +1,6 @@
 {
   "rewrites": [
     { "source": "/api/check", "destination": "/api/check-v2.js" },
-    { "source": "/", "destination": "/manager.html" }
+    { "source": "/", "destination": "/manager-compact.html" }
   ]
 }
